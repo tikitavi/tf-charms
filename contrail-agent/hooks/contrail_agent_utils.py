@@ -1,6 +1,8 @@
+import binascii
 import os
 import socket
 import yaml
+import struct
 from subprocess import (
     check_call,
     check_output,
@@ -170,6 +172,7 @@ def get_context():
     ctx["sriov_physical_interface"] = config.get("sriov-physical-interface")
     ctx["sriov_numvfs"] = config.get("sriov-numvfs")
     ctx["max_vm_flows"] = config.get("max-vm-flows")
+    ctx["datapath_encryption"] = config.get("datapath-encryption")
     ctx["contrail_version"] = common_utils.get_contrail_version()
 
     # NOTE: charm should set non-fqdn hostname to be compatible with R5.0 deployments
@@ -317,6 +320,40 @@ def _update_charm_status(ctx):
         status_set('blocked',
                    'Reboot is required due to hugepages allocation.')
         return
+    if ctx["datapath_encryption"]:
+        #TODO: move to function?
+        ctx["vhost_ip"] = get_vhost_ip()
+        binStr=bin(struct.unpack('!I', socket.inet_aton(ctx["vhost_ip"]))[0])
+        ctx["leftid"] = binascii.hexlify(binStr.encode(encoding='UTF-8')).decode()
+
+        #TODO: move to function?
+        ip_list = []
+        for rid in relation_ids("agent-cluster"):
+            for unit in related_units(rid):
+                ip = relation_get("vhost-address", unit, rid)
+                if ip:
+                    ip_list.append(ip)
+        ctx["ip_list"] = ip_list
+
+        STRONGSWAN_PATH = '/etc/contrail/vrouter/strongswan/'
+        common_utils.render_and_log("stroke.conf",
+            STRONGSWAN_PATH + "stroke.conf", ctx)
+        common_utils.render_and_log("strongswan.conf",
+            STRONGSWAN_PATH + "strongswan.conf", ctx)
+        common_utils.render_and_log("contrail-ipsec.conf",
+            STRONGSWAN_PATH + "contrail-ipsec.conf", ctx)
+
+        check_call(['modprobe', 'ip_vti'])
+
+        changed = common_utils.render_and_log("conn.conf",
+            STRONGSWAN_PATH + "conn/conn.conf", ctx)
+        changed |= common_utils.render_and_log("ipsec.conf",
+            STRONGSWAN_PATH + "ipsec.conf", ctx)
+        changed |= common_utils.render_and_log("ipsec.secrets",
+            STRONGSWAN_PATH + "ipsec.secrets", ctx)
+        changed |= common_utils.render_and_log("strongswan.yaml",
+                                STRONGSWAN_PATH + "strongswan.yaml", ctx)
+        docker_utils.compose_run(STRONGSWAN_PATH + "strongswan.yaml", changed)
 
     common_utils.update_services_status(MODULE, SERVICES)
 
